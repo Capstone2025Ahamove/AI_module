@@ -1,61 +1,140 @@
-//
 //  ContentView.swift
 //  Capstone AI module
-//
-//  Created by Andy L on 28/7/25.
-//
 
-//  ImageAssistant.swift
-//  ImageAssistant.swift
 import SwiftUI
 import PhotosUI
+
+struct ChatMessage: Identifiable {
+    let id = UUID()
+    let sender: String // "user" or "assistant"
+    let content: String
+}
 
 struct ContentView: View {
     @State private var resultText = ""
     @State private var showImagePicker = false
     @State private var isLoading = false
-    @State private var threadId: String? = nil
+    @State private var threadId: String? = UserDefaults.standard.string(forKey: "threadId")
     @State private var userMessage: String = ""
     @State private var uploadedFileId: String? = nil
+    @State private var messages: [ChatMessage] = []
 
-    let assistantId = "asst_7c288KCU3uwPmtCmynNeVOML"
+    let assistantId = "asst_p0ajNzziydcju4E9O37JLWtt"
     let apiKey = ""
 
     var body: some View {
-        VStack(spacing: 20) {
-            Button("Select Image from Photo Library") {
-                showImagePicker = true
-            }
-            .padding()
-            .disabled(isLoading)
+        ScrollViewReader { scrollProxy in
+            ZStack(alignment: .bottomTrailing) {
+                VStack {
+                    Button("Select Image from Photo Library") {
+                        showImagePicker = true
+                    }
+                    .padding()
+                    .disabled(isLoading)
 
-            TextField("Ask about the image...", text: $userMessage)
-                .textFieldStyle(RoundedBorderTextFieldStyle())
-                .padding(.horizontal)
-
-            Button("Send Message") {
-                if let tid = threadId, !userMessage.isEmpty {
-                    sendChatMessage(threadId: tid, content: userMessage)
-                }
-            }
-            .disabled(isLoading || threadId == nil || userMessage.isEmpty)
-
-            if isLoading {
-                ProgressView("Processing...")
-            } else {
-                ScrollView {
-                    Text(resultText.isEmpty ? "Please upload an image you would like me to analyze for your business needs." : resultText)
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 10) {
+                            ForEach(messages) { msg in
+                                HStack {
+                                    if msg.sender == "user" {
+                                        Spacer()
+                                        Text(msg.content)
+                                            .padding()
+                                            .background(Color.blue.opacity(0.2))
+                                            .cornerRadius(10)
+                                            .frame(maxWidth: 250, alignment: .trailing)
+                                    } else {
+                                        Text(msg.content)
+                                            .padding()
+                                            .background(Color.gray.opacity(0.2))
+                                            .cornerRadius(10)
+                                            .frame(maxWidth: 250, alignment: .leading)
+                                        Spacer()
+                                    }
+                                }
+                                .id(msg.id)
+                            }
+                        }
                         .padding()
+                    }
+
+                    Spacer()
+
+                    VStack(spacing: 8) {
+                        HStack {
+                            TextField("Continue conversation...", text: $userMessage)
+                                .textFieldStyle(RoundedBorderTextFieldStyle())
+
+                            if isLoading {
+                                ProgressView()
+                                    .scaleEffect(0.8)
+                                    .padding(.leading, 8)
+                            }
+                        }
+                        .padding(.horizontal)
+
+                        Button("Send Message") {
+                            print("🔵 Sending message: \(userMessage)")
+                            print("📎 Current uploadedFileId: \(uploadedFileId ?? "nil")")
+                            print("🧵 Using threadId: \(threadId ?? "nil")")
+                            if let tid = threadId, !userMessage.isEmpty {
+                                let newMessage = ChatMessage(sender: "user", content: userMessage)
+                                messages.append(newMessage)
+                                sendChatMessage(threadId: tid, content: userMessage)
+                                userMessage = ""
+
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                    scrollProxy.scrollTo(newMessage.id, anchor: .bottom)
+                                }
+                            }
+                        }
+                        .disabled(isLoading || threadId == nil || userMessage.isEmpty)
+                        .padding(.bottom)
+                    }
+                    .background(Color(UIColor.systemBackground))
                 }
             }
-        }
-        .sheet(isPresented: $showImagePicker) {
-            PhotoPicker { image in
-                saveTempImageAndHandle(image)
+            // ✅ Attach .sheet to the ZStack, not the VStack
+            .sheet(isPresented: $showImagePicker) {
+                PhotoPicker { image in
+                    saveTempImageAndHandle(image)
+                }
+            }
+            // ✅ Handle auto-scroll when new message arrives
+            .onChange(of: messages.count) { _ in
+                if let last = messages.last {
+                    DispatchQueue.main.async {
+                        scrollProxy.scrollTo(last.id, anchor: .bottom)
+                    }
+                }
             }
         }
     }
 
+
+    
+    func sendChatMessage(threadId: String, content: String) {
+            var req = URLRequest(url: URL(string: "https://api.openai.com/v1/threads/\(threadId)/messages")!)
+            req.httpMethod = "POST"
+            req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.setValue("assistants=v2", forHTTPHeaderField: "OpenAI-Beta")
+
+            let payload: [String: Any] = [
+                "role": "user",
+                "content": content
+            ]
+
+            req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+
+            DispatchQueue.main.async {
+                isLoading = true
+            }
+
+            URLSession.shared.dataTask(with: req) { data, _, _ in
+                runAssistant(threadId: threadId)
+            }.resume()
+        }
     func saveTempImageAndHandle(_ image: UIImage) {
         let temp = FileManager.default.temporaryDirectory.appendingPathComponent("selected.jpg")
         if let data = image.jpegData(compressionQuality: 0.9) {
@@ -108,10 +187,12 @@ struct ContentView: View {
                     isLoading = false
                 }
             }
+
+            uploadedFileId = fid
+
             DispatchQueue.main.async {
-                uploadedFileId = fid
+                createThread(with: fid)
             }
-            createThread(with: fid)
         }.resume()
     }
 
@@ -135,26 +216,9 @@ struct ContentView: View {
             }
             DispatchQueue.main.async {
                 threadId = tid
+                UserDefaults.standard.set(tid, forKey: "threadId")
             }
             addMessage(threadId: tid, fileId: fileId)
-        }.resume()
-    }
-
-    func sendChatMessage(threadId: String, content: String) {
-        var req = URLRequest(url: URL(string:"https://api.openai.com/v1/threads/\(threadId)/messages")!)
-        req.httpMethod = "POST"
-        req.setValue("Bearer \(apiKey)", forHTTPHeaderField:"Authorization")
-        req.setValue("application/json", forHTTPHeaderField:"Content-Type")
-        req.setValue("assistants=v2", forHTTPHeaderField:"OpenAI-Beta")
-        var payload: [String:Any] = ["role":"user","content":content]
-        if let fid = uploadedFileId {
-            payload["file_ids"] = [fid]
-        }
-        req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
-
-        isLoading = true
-        URLSession.shared.dataTask(with: req) { data, _, _ in
-            runAssistant(threadId: threadId)
         }.resume()
     }
 
@@ -165,7 +229,7 @@ struct ContentView: View {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("assistants=v2", forHTTPHeaderField: "OpenAI-Beta")
 
-        // 🧠 Only send the image, no text content
+        // ✅ Use image_file content block, not file_ids
         let payload: [String: Any] = [
             "role": "user",
             "content": [
@@ -178,17 +242,16 @@ struct ContentView: View {
 
         req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
 
-        // UI feedback
         DispatchQueue.main.async {
-            resultText = "Image uploaded. Analyzing the dashboard..."
+            resultText = "🖼️ Image uploaded. Analyzing..."
             isLoading = true
         }
 
-        // 🔁 Run assistant after sending message
-        URLSession.shared.dataTask(with: req) { data, _, _ in
+        URLSession.shared.dataTask(with: req) { _, _, _ in
             runAssistant(threadId: threadId)
         }.resume()
     }
+
 
     func runAssistant(threadId: String) {
         var req = URLRequest(url: URL(string:"https://api.openai.com/v1/threads/\(threadId)/runs")!)
@@ -259,7 +322,7 @@ struct ContentView: View {
                 }
             }
             DispatchQueue.main.async {
-                resultText = value
+                messages.append(ChatMessage(sender: "assistant", content: value))
                 isLoading = false
                 userMessage = ""
             }
@@ -298,9 +361,6 @@ struct PhotoPicker: UIViewControllerRepresentable {
         }
     }
 }
-
-// Chat input + assistant message capability added
-
 
 #Preview {
     ContentView()
