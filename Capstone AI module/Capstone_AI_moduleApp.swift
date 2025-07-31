@@ -11,7 +11,9 @@ import SwiftUI
 struct Capstone_AI_moduleApp: App {
     var body: some Scene {
         WindowGroup {
-            ContentView()
+//            ContentView()
+            AnalyzeView()
+
         }
     }
 }
