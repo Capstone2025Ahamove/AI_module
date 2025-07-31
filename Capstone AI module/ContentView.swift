@@ -18,6 +18,8 @@ struct ContentView: View {
     @State private var userMessage: String = ""
     @State private var uploadedFileId: String? = nil
     @State private var messages: [ChatMessage] = []
+    @State private var showFilePicker = false
+
 
     let assistantId = "asst_p0ajNzziydcju4E9O37JLWtt"
     let apiKey = ""
@@ -31,6 +33,13 @@ struct ContentView: View {
                     }
                     .padding()
                     .disabled(isLoading)
+                    
+                    Button("Select Spreadsheet from Files") {
+                        showFilePicker = true
+                    }
+                    .padding()
+                    .disabled(isLoading)
+
 
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 10) {
@@ -94,10 +103,25 @@ struct ContentView: View {
                     .background(Color(UIColor.systemBackground))
                 }
             }
-            // ✅ Attach .sheet to the ZStack, not the VStack
             .sheet(isPresented: $showImagePicker) {
                 PhotoPicker { image in
                     saveTempImageAndHandle(image)
+                }
+            }
+
+            // ✅ This must be separate and not inside the `.sheet`
+            .fileImporter(
+                isPresented: $showFilePicker,
+                allowedContentTypes: [.commaSeparatedText, .plainText, .spreadsheet, .data],
+                allowsMultipleSelection: false
+            ) { result in
+                switch result {
+                case .success(let urls):
+                    if let fileURL = urls.first {
+                        uploadFileToOpenAI(fileURL: fileURL)
+                    }
+                case .failure(let error):
+                    print("File import failed: \(error)")
                 }
             }
             // ✅ Handle auto-scroll when new message arrives
@@ -132,7 +156,7 @@ struct ContentView: View {
             }
 
             URLSession.shared.dataTask(with: req) { data, _, _ in
-                runAssistant(threadId: threadId)
+                runAssistant(threadId: threadId, fileId: nil)
             }.resume()
         }
     func saveTempImageAndHandle(_ image: UIImage) {
@@ -161,10 +185,11 @@ struct ContentView: View {
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 
         guard let fileData = try? Data(contentsOf: fileURL) else {
-            return DispatchQueue.main.async {
-                resultText = "Failed to read file."
+            DispatchQueue.main.async {
+                resultText = "❌ Failed to read file."
                 isLoading = false
             }
+            return
         }
 
         var body = Data()
@@ -182,21 +207,23 @@ struct ContentView: View {
             guard let d = data,
                   let json = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
                   let fid = json["id"] as? String else {
-                return DispatchQueue.main.async {
-                    resultText = "Upload failed."
+                DispatchQueue.main.async {
+                    resultText = "❌ Upload failed."
                     isLoading = false
                 }
+                return
             }
 
             uploadedFileId = fid
-
             DispatchQueue.main.async {
-                createThread(with: fid)
+                createThread(with: fid, fileURL: fileURL)
             }
         }.resume()
     }
 
-    func createThread(with fileId: String) {
+
+
+    func createThread(with fileId: String, fileURL: URL) {
         var req = URLRequest(url: URL(string:"https://api.openai.com/v1/threads")!)
         req.httpMethod = "POST"
         req.setValue("Bearer \(apiKey)", forHTTPHeaderField:"Authorization")
@@ -209,7 +236,7 @@ struct ContentView: View {
                   let json = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
                   let tid = json["id"] as? String else {
                 DispatchQueue.main.async {
-                    resultText = "Failed to start thread."
+                    resultText = "❌ Failed to start thread."
                     isLoading = false
                 }
                 return
@@ -218,88 +245,169 @@ struct ContentView: View {
                 threadId = tid
                 UserDefaults.standard.set(tid, forKey: "threadId")
             }
-            addMessage(threadId: tid, fileId: fileId)
+            addMessage(threadId: tid, fileId: fileId, fileURL: fileURL)
         }.resume()
     }
 
-    func addMessage(threadId: String, fileId: String) {
+
+
+    func addMessage(threadId: String, fileId: String, fileURL: URL) {
         var req = URLRequest(url: URL(string: "https://api.openai.com/v1/threads/\(threadId)/messages")!)
         req.httpMethod = "POST"
         req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("assistants=v2", forHTTPHeaderField: "OpenAI-Beta")
 
-        // ✅ Use image_file content block, not file_ids
-        let payload: [String: Any] = [
-            "role": "user",
-            "content": [
-                [
-                    "type": "image_file",
-                    "image_file": ["file_id": fileId]
+        let fileExtension = fileURL.pathExtension.lowercased()
+        let isImage = ["jpg", "jpeg", "png", "heic"].contains(fileExtension)
+
+        let payload: [String: Any]
+
+        if isImage {
+            payload = [
+                "role": "user",
+                "content": [
+                    [
+                        "type": "image_file",
+                        "image_file": ["file_id": fileId]
+                    ]
                 ]
             ]
-        ]
+        } else {
+            payload = [
+                "role": "user",
+                "content": [
+                    [
+                        "type": "text",
+                        "text": "This spreadsheet contains dashboard KPIs. Please analyze the key trends and provide a short 3–4 bullet point summary."
+                    ]
+                ]
+            ]
+        }
+
+        print("📤 Sending message with payload: \(payload)")
 
         req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
 
         DispatchQueue.main.async {
-            resultText = "🖼️ Image uploaded. Analyzing..."
+            resultText = isImage ? "🖼️ Image uploaded. Analyzing..." : "📊 Spreadsheet uploaded. Analyzing..."
             isLoading = true
         }
 
-        URLSession.shared.dataTask(with: req) { _, _, _ in
-            runAssistant(threadId: threadId)
-        }.resume()
-    }
-
-
-    func runAssistant(threadId: String) {
-        var req = URLRequest(url: URL(string:"https://api.openai.com/v1/threads/\(threadId)/runs")!)
-        req.httpMethod = "POST"
-        req.setValue("Bearer \(apiKey)", forHTTPHeaderField:"Authorization")
-        req.setValue("application/json", forHTTPHeaderField:"Content-Type")
-        req.setValue("assistants=v2", forHTTPHeaderField:"OpenAI-Beta")
-        req.httpBody = try? JSONSerialization.data(withJSONObject: ["assistant_id":assistantId])
-
-        URLSession.shared.dataTask(with: req) { data, _, _ in
-            guard let d = data,
-                  let json = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-                  let runId = json["id"] as? String else {
+        URLSession.shared.dataTask(with: req) { data, response, error in
+            if let error = error {
+                print("❌ Message send error: \(error.localizedDescription)")
                 DispatchQueue.main.async {
-                    resultText = "Run failed."
+                    resultText = "❌ Failed to send message."
                     isLoading = false
                 }
                 return
             }
-            pollRun(threadId: threadId, runId: runId)
+
+            if let res = response as? HTTPURLResponse {
+                print("📡 Message send response status: \(res.statusCode)")
+            }
+
+            runAssistant(threadId: threadId, fileId: fileId)
         }.resume()
     }
 
+
+    func runAssistant(threadId: String, fileId: String?) {
+        var req = URLRequest(url: URL(string:"https://api.openai.com/v1/threads/\(threadId)/runs")!)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("assistants=v2", forHTTPHeaderField: "OpenAI-Beta")
+
+        var payload: [String: Any] = [
+            "assistant_id": assistantId
+        ]
+
+        if let fid = fileId {
+            payload["tool_resources"] = [
+                "code_interpreter": [
+                    "file_ids": [fid]
+                ]
+            ]
+        }
+
+        print("🚀 Running assistant with payload: \(payload)")
+
+        req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+
+        URLSession.shared.dataTask(with: req) { data, _, _ in
+            if let d = data,
+               let json = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
+                print("📩 Run creation response: \(json)")
+                if let runId = json["id"] as? String {
+                    pollRun(threadId: threadId, runId: runId)
+                } else {
+                    print("❌ Missing run ID")
+                    DispatchQueue.main.async {
+                        resultText = "Missing run ID."
+                        isLoading = false
+                    }
+                }
+            } else {
+                DispatchQueue.main.async {
+                    resultText = "Run failed."
+                    isLoading = false
+                }
+            }
+        }.resume()
+    }
+
+
     func pollRun(threadId: String, runId: String) {
+        print("🕓 Polling for run: \(runId)")
         DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
             var req = URLRequest(url: URL(string:"https://api.openai.com/v1/threads/\(threadId)/runs/\(runId)")!)
             req.httpMethod = "GET"
-            req.setValue("Bearer \(apiKey)", forHTTPHeaderField:"Authorization")
-            req.setValue("assistants=v2", forHTTPHeaderField:"OpenAI-Beta")
+            req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            req.setValue("assistants=v2", forHTTPHeaderField: "OpenAI-Beta")
 
-            URLSession.shared.dataTask(with: req) { data, _, _ in
-                guard let d = data,
-                      let json = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-                      let status = json["status"] as? String else {
+            URLSession.shared.dataTask(with: req) { data, _, error in
+                if let error = error {
+                    print("❌ Poll error: \(error.localizedDescription)")
                     DispatchQueue.main.async {
-                        resultText = "Checking status failed."
+                        resultText = "Polling failed."
                         isLoading = false
                     }
                     return
                 }
+
+                guard let d = data,
+                      let json = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else {
+                    print("❌ Poll response is not JSON")
+                    DispatchQueue.main.async {
+                        resultText = "Failed to parse poll response."
+                        isLoading = false
+                    }
+                    return
+                }
+
+                print("🔄 Poll response: \(json)")
+
+                let status = json["status"] as? String ?? "unknown"
+
                 if status == "completed" {
+                    print("✅ Run completed")
                     fetchMessages(threadId: threadId)
+                } else if status == "failed" {
+                    print("❌ Run failed")
+                    DispatchQueue.main.async {
+                        resultText = "Assistant run failed."
+                        isLoading = false
+                    }
                 } else {
+                    print("⏳ Run still in progress (\(status)), polling again...")
                     pollRun(threadId: threadId, runId: runId)
                 }
             }.resume()
         }
     }
+
 
     func fetchMessages(threadId: String) {
         var req = URLRequest(url: URL(string:"https://api.openai.com/v1/threads/\(threadId)/messages")!)
@@ -309,25 +417,41 @@ struct ContentView: View {
         req.setValue("assistants=v2", forHTTPHeaderField:"OpenAI-Beta")
 
         URLSession.shared.dataTask(with: req) { data, _, _ in
-            guard let d = data,
-                  let json = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-                  let msgs = json["data"] as? [[String: Any]],
-                  let first = msgs.first,
-                  let contentArr = first["content"] as? [[String: Any]],
-                  let textObj = contentArr.first?["text"] as? [String:Any],
-                  let value = textObj["value"] as? String else {
-                return DispatchQueue.main.async {
+            guard let d = data else {
+                print("❌ No data returned")
+                DispatchQueue.main.async {
                     resultText = "Failed to fetch message."
                     isLoading = false
                 }
+                return
             }
+
+            if let str = String(data: d, encoding: .utf8) {
+                print("📨 Raw message response:\n\(str)")
+            }
+
+            guard let json = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                  let msgs = json["data"] as? [[String: Any]],
+                  let first = msgs.first,
+                  let contentArr = first["content"] as? [[String: Any]],
+                  let textObj = contentArr.first?["text"] as? [String: Any],
+                  let value = textObj["value"] as? String else {
+                DispatchQueue.main.async {
+                    resultText = "Failed to parse assistant reply."
+                    isLoading = false
+                }
+                return
+            }
+
             DispatchQueue.main.async {
+                print("✅ Assistant reply: \(value)")
                 messages.append(ChatMessage(sender: "assistant", content: value))
                 isLoading = false
                 userMessage = ""
             }
         }.resume()
     }
+
 }
 
 struct PhotoPicker: UIViewControllerRepresentable {
