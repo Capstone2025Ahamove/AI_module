@@ -22,7 +22,7 @@ struct ContentView: View {
 
 
     let assistantId = "asst_p0ajNzziydcju4E9O37JLWtt"
-    let apiKey = ""
+    // let apiKey = ""
 
     var body: some View {
         ScrollViewReader { scrollProxy in

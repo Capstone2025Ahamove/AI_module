@@ -12,8 +12,8 @@ struct Capstone_AI_moduleApp: App {
     var body: some Scene {
         WindowGroup {
 //            ContentView()
-            AnalyzeView()
-
+//            AnalyzeView()
+            KPIAnalysisView()
         }
     }
 }
