@@ -13,6 +13,7 @@ struct Capstone_AI_moduleApp: App {
         WindowGroup {
 //            ContentView()
 //            AnalyzeView()
+//            KPIAnalysisView()
             HomeView()
 
         }

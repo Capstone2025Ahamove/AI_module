@@ -15,15 +15,14 @@ struct ChatMessage: Identifiable {
 struct ChatView: View {
     var threadId: String?
     var fileId: String?
-    
-    @Environment(\.presentationMode) var presentationMode
 
+    @Environment(\.presentationMode) private var presentationMode
     @State private var userMessage = ""
     @State private var messages: [ChatMessage] = []
     @State private var isLoading = false
 
-    let assistantId = "asst_p0ajNzziydcju4E9O37JLWtt"
-    let apiKey = ""
+    // Your chat assistant (keep your existing id)
+    private let assistantId = "asst_p0ajNzziydcju4E9O37JLWtt"
 
     var body: some View {
         NavigationStack {
@@ -37,47 +36,41 @@ struct ChatView: View {
             .navigationBarBackButtonHidden(true)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button(action: {
-                        presentationMode.wrappedValue.dismiss()
-                    }) {
-                        Image(systemName: "chevron.left")
-                            .foregroundColor(Color(hex: "#00731D"))
+                    Button { presentationMode.wrappedValue.dismiss() } label: {
+                        Image(systemName: "chevron.left").foregroundColor(Color(hex: "#00731D"))
                     }
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     HStack(spacing: 20) {
                         Button(action: {}) {
-                            Image(systemName: "arrow.down.circle")
-                                .foregroundColor(Color(hex: "#00731D"))
+                            Image(systemName: "arrow.down.circle").foregroundColor(Color(hex: "#00731D"))
                         }
                         Button(action: {}) {
-                            Image(systemName: "ellipsis.circle")
-                                .foregroundColor(Color(hex: "#00731D"))
+                            Image(systemName: "ellipsis.circle").foregroundColor(Color(hex: "#00731D"))
                         }
                     }
                 }
             }
+            .onAppear(perform: seedOpeningMessageIfNeeded)
         }
     }
+
+    // MARK: UI
 
     private var chatScrollView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                ForEach(messages) { message in
-                    messageBubble(for: message.content, isUser: message.sender == "user")
+                ForEach(messages) { msg in
+                    Text(msg.content)
+                        .padding()
+                        .background(msg.sender == "user" ? Color(hex: "#00731D") : Color.white)
+                        .foregroundColor(msg.sender == "user" ? .white : .black)
+                        .cornerRadius(10)
+                        .frame(maxWidth: .infinity, alignment: msg.sender == "user" ? .trailing : .leading)
                 }
             }
             .padding()
         }
-    }
-
-    private func messageBubble(for text: String, isUser: Bool) -> some View {
-        Text(text)
-            .padding()
-            .background(isUser ? Color(hex: "#00731D") : Color.white)
-            .foregroundColor(isUser ? .white : .black)
-            .cornerRadius(10)
-            .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
     }
 
     private var messageInputBar: some View {
@@ -85,14 +78,11 @@ struct ChatView: View {
             TextField("Continue conversation...", text: $userMessage)
                 .padding(10)
                 .background(Color.white)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color.gray.opacity(0.4), lineWidth: 1)
-                )
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.gray.opacity(0.4), lineWidth: 1))
 
-            Button(action: {
+            Button {
                 send()
-            }) {
+            } label: {
                 Image(systemName: "paperplane")
                     .padding(10)
                     .foregroundColor(Color(hex: "#00731D"))
@@ -103,120 +93,84 @@ struct ChatView: View {
         .background(Color("AppBackground"))
     }
 
+    // MARK: Seed opening chat from thread
+
+    private func seedOpeningMessageIfNeeded() {
+        guard messages.isEmpty, let tid = threadId else { return }
+        guard let _ = HTTPClient.shared.apiKey, !(HTTPClient.shared.apiKey ?? "").isEmpty else {
+            // Show a friendly notice if key is missing
+            messages = [ChatMessage(sender: "assistant", content: "Missing API key. Please set OPENAI_API_KEY in Info.plist.")]
+            return
+        }
+
+        isLoading = true
+        HTTPClient.shared.fetchLatestAssistantText(threadId: tid) { result in
+            DispatchQueue.main.async {
+                self.isLoading = false
+                switch result {
+                case .success(let text):
+                    let opener = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        + "\n\nAsk me anything about the analysis."
+                    self.messages.append(ChatMessage(sender: "assistant", content: opener))
+                case .failure:
+                    // If nothing is found yet, still show a helpful opener
+                    self.messages.append(ChatMessage(
+                        sender: "assistant",
+                        content: "I’m ready to answer questions about your analysis. Ask me anything about the KPIs, trends, or next actions."
+                    ))
+                }
+            }
+        }
+    }
+
+    // MARK: Send / Run
+
     private func send() {
-        guard let threadId = threadId, !userMessage.isEmpty else { return }
-        let userMsg = ChatMessage(sender: "user", content: userMessage)
-        messages.append(userMsg)
-        let messageText = userMessage
+        guard let tid = threadId, !userMessage.isEmpty else { return }
+        let outgoing = userMessage
+        messages.append(ChatMessage(sender: "user", content: outgoing))
         userMessage = ""
         isLoading = true
-        sendChatMessage(threadId: threadId, content: messageText)
-    }
 
-    private func sendChatMessage(threadId: String, content: String) {
-        var req = URLRequest(url: URL(string: "https://api.openai.com/v1/threads/\(threadId)/messages")!)
-        req.httpMethod = "POST"
-        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue("assistants=v2", forHTTPHeaderField: "OpenAI-Beta")
-
-        let payload: [String: Any] = [
-            "role": "user",
-            "content": content
-        ]
-
-        req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
-
-        URLSession.shared.dataTask(with: req) { _, _, _ in
-            runAssistant(threadId: threadId, fileId: fileId)
-        }.resume()
-    }
-
-    private func runAssistant(threadId: String, fileId: String?) {
-        var req = URLRequest(url: URL(string:"https://api.openai.com/v1/threads/\(threadId)/runs")!)
-        req.httpMethod = "POST"
-        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue("assistants=v2", forHTTPHeaderField: "OpenAI-Beta")
-
-        var payload: [String: Any] = ["assistant_id": assistantId]
-
-        if let fid = fileId {
-            payload["tool_resources"] = [
-                "code_interpreter": ["file_ids": [fid]]
-            ]
-        }
-
-        req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
-
-        URLSession.shared.dataTask(with: req) { data, _, _ in
-            if let data = data,
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let runId = json["id"] as? String {
-                pollRun(threadId: threadId, runId: runId)
-            } else {
-                isLoading = false
-            }
-        }.resume()
-    }
-
-    private func pollRun(threadId: String, runId: String) {
-        DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
-            var req = URLRequest(url: URL(string:"https://api.openai.com/v1/threads/\(threadId)/runs/\(runId)")!)
-            req.httpMethod = "GET"
-            req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-            req.setValue("assistants=v2", forHTTPHeaderField: "OpenAI-Beta")
-
-            URLSession.shared.dataTask(with: req) { data, _, _ in
-                guard let data = data,
-                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let status = json["status"] as? String else {
-                    isLoading = false
-                    return
+        // 1) Add user message to the thread
+        let content: [[String: Any]] = [["type": "text", "text": outgoing]]
+        HTTPClient.shared.addMessage(threadId: tid, content: content) { result in
+            switch result {
+            case .failure:
+                DispatchQueue.main.async { self.isLoading = false }
+            case .success:
+                // 2) Run the chat assistant on the same thread (attach file to code interpreter if available)
+                var toolResources: [String: Any]? = nil
+                if let fid = self.fileId {
+                    toolResources = ["code_interpreter": ["file_ids": [fid]]]
                 }
-
-                if status == "completed" {
-                    fetchMessages(threadId: threadId)
-                } else if status == "failed" {
-                    isLoading = false
-                } else {
-                    pollRun(threadId: threadId, runId: runId)
+                HTTPClient.shared.createRun(threadId: tid, assistantId: assistantId, toolResources: toolResources) { runResult in
+                    switch runResult {
+                    case .failure:
+                        DispatchQueue.main.async { self.isLoading = false }
+                    case .success(let runId):
+                        // 3) Poll and then fetch the newest assistant text
+                        HTTPClient.shared.pollRunWithBackoff(threadId: tid, runId: runId, maxAttempts: 10, initialDelay: 2.0) { pollResult in
+                            switch pollResult {
+                            case .failure:
+                                DispatchQueue.main.async { self.isLoading = false }
+                            case .success:
+                                HTTPClient.shared.fetchLatestAssistantText(threadId: tid) { textResult in
+                                    DispatchQueue.main.async {
+                                        self.isLoading = false
+                                        if case .success(let reply) = textResult {
+                                            self.messages.append(ChatMessage(sender: "assistant", content: reply))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
-            }.resume()
+            }
         }
-    }
-
-    private func fetchMessages(threadId: String) {
-        var req = URLRequest(url: URL(string:"https://api.openai.com/v1/threads/\(threadId)/messages")!)
-        req.httpMethod = "GET"
-        req.setValue("Bearer \(apiKey)", forHTTPHeaderField:"Authorization")
-        req.setValue("application/json", forHTTPHeaderField:"Content-Type")
-        req.setValue("assistants=v2", forHTTPHeaderField:"OpenAI-Beta")
-
-        URLSession.shared.dataTask(with: req) { data, _, _ in
-            guard let d = data else {
-                isLoading = false
-                return
-            }
-
-            guard let json = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-                  let msgs = json["data"] as? [[String: Any]],
-                  let first = msgs.first,
-                  let contentArr = first["content"] as? [[String: Any]],
-                  let textObj = contentArr.first?["text"] as? [String: Any],
-                  let value = textObj["value"] as? String else {
-                isLoading = false
-                return
-            }
-
-            DispatchQueue.main.async {
-                messages.append(ChatMessage(sender: "assistant", content: value))
-                isLoading = false
-            }
-        }.resume()
     }
 }
-
 
 #Preview {
     ChatView()

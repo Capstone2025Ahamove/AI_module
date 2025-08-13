@@ -40,7 +40,7 @@ struct HomeView: View {
                                     .frame(width: 24, height: 24)
                                     .foregroundColor(Color(hex: "#00731D"))
                             }
-                            Button(action: {}) {
+                            NavigationLink(destination: KPIAnalysisView()) {
                                 Image(systemName: "ellipsis.circle")
                                     .resizable()
                                     .frame(width: 24, height: 24)
