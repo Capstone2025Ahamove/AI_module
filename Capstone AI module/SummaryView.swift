@@ -9,6 +9,9 @@ struct SummaryView: View {
     var fileURL: URL?
     var selectedImage: Image?
 
+    // NEW: a stable fingerprint coming from HomeView so we can detect if input changed
+    var inputKey: String? = nil
+
     @Environment(\.presentationMode) private var presentationMode
 
     @State private var summaryText = ""
@@ -17,6 +20,9 @@ struct SummaryView: View {
     @State private var threadId: String? = nil
     @State private var fileId: String? = nil
     @State private var navigateToChat = false
+
+    // NEW: remember the last analyzed key so we can skip re-analysis
+    @State private var analyzedKey: String? = nil
 
     // UI
     @State private var showReportsFolder = false
@@ -125,7 +131,6 @@ struct SummaryView: View {
                                 .foregroundColor(.white)
                                 .cornerRadius(20)
                         }
-
                         .disabled(summaryText.isEmpty && insightText.isEmpty)
 
                         NavigationLink(
@@ -152,7 +157,26 @@ struct SummaryView: View {
             }
         }
         .navigationBarBackButtonHidden(true)
-        .onAppear { startAnalysis() }
+        // NEW: only analyze if input changed (compare keys)
+        .onAppear {
+            // Compute a stable key for the current input
+            let currentKey = inputKey
+                ?? (fileURL?.lastPathComponent ?? (selectedImage != nil ? "inline-image" : nil))
+
+            if analyzedKey == currentKey,
+               !(summaryText.isEmpty && insightText.isEmpty) {
+                print("↩️ SummaryView re-appeared with same inputKey. Skip re-analysis.")
+                return
+            }
+
+            if analyzedKey != currentKey {
+                analyzedKey = currentKey           // remember
+                summaryText = ""                   // clear old output for new input
+                insightText = ""
+            }
+
+            startAnalysis()
+        }
         .sheet(isPresented: $showReportsFolder) {
             // Folder browser that *returns* the picked file URL
             FolderBrowser(startURL: reportsDirectoryURL()) { url in
@@ -165,7 +189,6 @@ struct SummaryView: View {
                 QuickLookPreview(url: url)
             }
         }
-        
     }
 
     // MARK: - Download / Folder
@@ -213,7 +236,7 @@ struct SummaryView: View {
         return fileURL
     }
 
-    // MARK: - Flow (unchanged core; sequential runs to avoid active-run 400s)
+    // MARK: - Flow (sequential runs to avoid active-run 400s)
 
     private func startAnalysis() {
         guard let apiKey = HTTPClient.shared.apiKey, !apiKey.isEmpty else {
@@ -370,27 +393,12 @@ struct SummaryView: View {
             ]
         } else {
             content = [
-                ["type": "text", "text": "This spreadsheet contains KPIs. Analyze trends and provide a short summary."] // no file_ids here
+                ["type": "text", "text": "This spreadsheet contains KPIs. Analyze trends and provide a short summary."]
             ]
         }
         HTTPClient.shared.addMessage(threadId: threadId, content: content, completion: completion)
     }
 }
-
-//// MARK: - Folder Browser (opens a directory in Files UI)
-//
-//struct FolderBrowser: UIViewControllerRepresentable {
-//    let startURL: URL
-//
-//    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-//        // Open-anything type; start in our folder
-//        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: false)
-//        picker.directoryURL = startURL
-//        picker.allowsMultipleSelection = false
-//        return picker
-//    }
-//    func updateUIViewController(_ vc: UIDocumentPickerViewController, context: Context) {}
-//}
 
 // MARK: - HTTPClient (same as your latest version)
 

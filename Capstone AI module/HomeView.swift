@@ -5,7 +5,6 @@
 //  Created by Elwiz Scott on 31/7/25.
 //
 
-
 import SwiftUI
 import UniformTypeIdentifiers
 import PhotosUI
@@ -13,15 +12,22 @@ import PhotosUI
 struct HomeView: View {
     @State private var selectedFileURL: URL? = nil
     @State private var selectedPhoto: PhotosPickerItem? = nil
-    @State private var isDocumentPicked = false
-    @State private var navigateToSummary = false
     @State private var selectedPhotoImage: Image? = nil
+
+    @State private var isDocumentPicked = false
+    @State private var showPhotoPicker = false       // reopen photo picker from "Update"
+
+    @State private var navigateToSummary = false
+
+    // NEW: fingerprint of the current input so downstream views can avoid reloading
+    @State private var inputKey: String? = nil
+    
 
     var body: some View {
         NavigationStack {
             ZStack(alignment: .top) {
-                Color("AppBackground")
-                    .ignoresSafeArea()
+                // Use explicit hex to avoid asset issues
+                Color(hex: "#FFFCF7").ignoresSafeArea()
 
                 VStack(spacing: 24) {
                     // Top Buttons
@@ -66,9 +72,12 @@ struct HomeView: View {
                             .padding(.horizontal)
                     }
 
-                    // Upload Buttons
+                    // Upload row
                     HStack(spacing: 40) {
-                        PhotosPicker(selection: $selectedPhoto, matching: .images) {
+                        // Photo picker button
+                        Button {
+                            showPhotoPicker = true
+                        } label: {
                             VStack {
                                 Image(systemName: "photo")
                                     .font(.system(size: 32))
@@ -79,19 +88,20 @@ struct HomeView: View {
                             .frame(width: 120, height: 100)
                             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color(hex: "#00731D"), lineWidth: 2))
                         }
+                        // Present the Photos picker when requested or when user taps Update
+                        .photosPicker(isPresented: $showPhotoPicker, selection: $selectedPhoto, matching: .images)
                         .onChange(of: selectedPhoto) { newItem in
                             Task {
-                                if let data = try? await newItem?.loadTransferable(type: Data.self),
-                                   let uiImage = UIImage(data: data) {
-                                    selectedPhotoImage = Image(uiImage: uiImage)
-                                    selectedFileURL = nil // Clear file if any
-                                }
+                                guard let data = try? await newItem?.loadTransferable(type: Data.self),
+                                      let uiImage = UIImage(data: data) else { return }
+                                selectedPhotoImage = Image(uiImage: uiImage)
+                                selectedFileURL = nil
+                                inputKey = "img-" + UUID().uuidString // new image → new key
                             }
                         }
 
-                        Button(action: {
-                            isDocumentPicked = true
-                        }) {
+                        // File importer button
+                        Button(action: { isDocumentPicked = true }) {
                             VStack {
                                 Image(systemName: "tablecells")
                                     .font(.system(size: 32))
@@ -111,7 +121,8 @@ struct HomeView: View {
                             case .success(let urls):
                                 if let first = urls.first {
                                     selectedFileURL = first
-                                    selectedPhotoImage = nil // Clear image if any
+                                    selectedPhotoImage = nil
+                                    inputKey = fingerprint(for: first)   // file → fingerprint
                                 }
                             case .failure:
                                 break
@@ -122,7 +133,6 @@ struct HomeView: View {
                     // File Display
                     if selectedPhotoImage != nil || selectedFileURL != nil {
                         HStack(spacing: 12) {
-                            // Show image
                             if let selectedPhotoImage = selectedPhotoImage {
                                 selectedPhotoImage
                                     .resizable()
@@ -130,7 +140,6 @@ struct HomeView: View {
                                     .frame(width: 50, height: 50)
                             }
 
-                            // Show file name if picked
                             if let url = selectedFileURL {
                                 Text(url.lastPathComponent)
                                     .fontWeight(.semibold)
@@ -141,12 +150,12 @@ struct HomeView: View {
 
                             Spacer()
 
+                            // UPDATE: re-open the appropriate picker without clearing the selection
                             Button("Update") {
                                 if selectedPhotoImage != nil {
-                                    selectedPhoto = nil // Clear and re-select
-                                    selectedPhotoImage = nil
+                                    showPhotoPicker = true            // re-open photo picker
                                 } else {
-                                    isDocumentPicked = true
+                                    isDocumentPicked = true           // re-open file importer
                                 }
                             }
                             .padding(.horizontal, 6)
@@ -158,13 +167,13 @@ struct HomeView: View {
                             Button("Delete") {
                                 selectedPhotoImage = nil
                                 selectedFileURL = nil
+                                inputKey = nil
                             }
                             .padding(.horizontal, 6)
                             .padding(.vertical, 6)
                             .foregroundColor(.white)
                             .background(Color(hex: "#EB4605"))
                             .cornerRadius(6)
-                            
                         }
                         .padding(6)
                         .frame(width: 280)
@@ -177,9 +186,15 @@ struct HomeView: View {
 
                     Spacer()
 
-                    // Analyze Button
-                    NavigationLink(destination: SummaryView(fileURL: selectedFileURL, selectedImage: selectedPhotoImage)
-, isActive: $navigateToSummary) {
+                    // Analyze Button → pass file, image, and inputKey
+                    NavigationLink(
+                        destination: SummaryView(
+                            fileURL: selectedFileURL,
+                            selectedImage: selectedPhotoImage,
+                            inputKey: inputKey
+                        ),
+                        isActive: $navigateToSummary
+                    ) {
                         Text("Start Analyze")
                             .frame(maxWidth: .infinity)
                             .frame(height: 50)
@@ -194,6 +209,16 @@ struct HomeView: View {
                 }
             }
         }
+    }
+
+    // MARK: - Helpers
+
+    private func fingerprint(for url: URL) -> String {
+        let name = url.lastPathComponent
+        let attrs = (try? FileManager.default.attributesOfItem(atPath: url.path)) ?? [:]
+        let size  = (attrs[.size] as? NSNumber)?.intValue ?? -1
+        let mtime = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? -1
+        return "\(name)|\(size)|\(Int(mtime))"
     }
 }
 
